@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SpaceX Launch Site Maps</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/MarkerCluster.min.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/MarkerCluster.Default.min.css">
+<style>
+  body { margin:0; font-family: Arial, Helvetica, sans-serif; background:#f4f5f7; color:#1d2433; }
+  header { padding:12px 16px; background:#0b1d3a; color:#fff; }
+  header h1 { margin:0; font-size:20px; }
+  header p { margin:4px 0 0; font-size:13px; opacity:.8; }
+  nav { display:flex; gap:6px; padding:10px 16px; flex-wrap:wrap; }
+  nav button { border:1px solid #c7ccd6; background:#fff; padding:8px 14px; border-radius:6px; cursor:pointer; font-size:14px; }
+  nav button.active { background:#0b1d3a; color:#fff; border-color:#0b1d3a; }
+  .panel { display:none; padding:0 16px 16px; }
+  .panel.active { display:block; }
+  .map { height:620px; border:1px solid #c7ccd6; border-radius:6px; }
+  .note { font-size:13px; margin:8px 0 0; line-height:1.5; }
+  .site-label { font-size:12px; font-weight:bold; color:#d35400; white-space:nowrap; }
+  .dist-label { font-size:12px; font-weight:bold; color:#d35400; white-space:nowrap; background:rgba(255,255,255,.85); padding:1px 4px; border-radius:3px; }
+  .dot { width:14px; height:14px; border-radius:50%; border:2px solid #fff; box-shadow:0 0 2px rgba(0,0,0,.6); }
+  table { border-collapse:collapse; margin-top:8px; font-size:13px; background:#fff; }
+  th, td { border:1px solid #d5d9e0; padding:4px 10px; text-align:left; }
+  .mouse { background:rgba(255,255,255,.9); padding:3px 6px; font-size:12px; border-radius:3px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>SpaceX Falcon 9 Launch Sites: Interactive Visual Analytics (Folium / Leaflet)</h1>
+  <p>Data: spacex_launch_geo.csv (IBM Skills Network), 56 launch records, 4 launch sites</p>
+</header>
+<nav>
+  <button class="active" data-tab="t1">Map 1 · All launch sites</button>
+  <button data-tab="t2">Map 2 · Launch outcomes</button>
+  <button data-tab="t3">Map 3 · Proximity distances</button>
+</nav>
+
+<section class="panel active" id="t1">
+  <div class="map" id="map1"></div>
+  <p class="note"><b>Finding:</b> All four sites are in the southern US (about 28.5°N in Florida and 34.6°N in California), as close to the Equator as the mainland allows. All of them sit on the coast, so rockets fly over the ocean, and Florida's eastern launches gain extra speed from Earth's rotation.</p>
+</section>
+
+<section class="panel" id="t2">
+  <div class="map" id="map2"></div>
+  <p class="note"><b>Green</b> = successful landing (class 1), <b>red</b> = failed landing (class 0). Click a cluster to expand it.</p>
+  <table id="sitetable"><thead><tr><th>Launch site</th><th>Launches</th><th>Successes</th><th>Success rate</th></tr></thead><tbody></tbody></table>
+</section>
+
+<section class="panel" id="t3">
+  <div class="map" id="map3"></div>
+  <p class="note">Distances from <b>CCAFS SLC-40</b> are calculated with the lab's <code>calculate_distance()</code> (R = 6373 km). Proximity points were picked with the mouse-position tool shown at top right.</p>
+  <table id="disttable"><thead><tr><th>Proximity</th><th>Lat</th><th>Long</th><th>Distance (km)</th></tr></thead><tbody></tbody></table>
+  <p class="note"><b>Finding:</b> The site is under 1.5 km from the coastline, a railway and a highway, which are needed for logistics and for transporting heavy hardware. It keeps a safety buffer of more than 20 km from the nearest city.</p>
+</section>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/leaflet.markercluster.min.js"></script>
+<script>
+// ---- Data (from spacex_launch_geo.csv) ----
+const SITES = {
+  'CCAFS LC-40':  [28.56230197, -80.57735648],
+  'CCAFS SLC-40': [28.56319718, -80.57682003],
+  'KSC LC-39A':   [28.57325457, -80.64689529],
+  'VAFB SLC-4E':  [34.63283416, -120.6107455]
+};
+// class values per launch, in CSV order, grouped by site
+const OUTCOMES = {
+  'CCAFS LC-40':  [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,0,1,1,1,0,1,1],
+  'VAFB SLC-4E':  [0,0,1,1,1,1,0,0,0,0],
+  'KSC LC-39A':   [1,0,1,1,0,1,1,0,1,1,1,1,1],
+  'CCAFS SLC-40': [1,1,0,0,0,1,0]
+};
+const NASA_JSC = [29.559684888503615, -95.0830971930759];
+
+function tiles(map){
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19, attribution: '&copy; OpenStreetMap contributors'
+  }).addTo(map);
+}
+function label(latlng, text, cls){
+  return L.marker(latlng, {icon: L.divIcon({className:'', html:'<div class="'+(cls||'site-label')+'">'+text+'</div>', iconSize:[0,0], iconAnchor:[0,0]})});
+}
+function mousePos(map){
+  const ctl = L.control({position:'topright'});
+  ctl.onAdd = () => { const d = L.DomUtil.create('div','mouse'); d.innerHTML='Lat: NaN Long: NaN'; map.on('mousemove', e => d.innerHTML = 'Lat: '+e.latlng.lat.toFixed(5)+' Long: '+e.latlng.lng.toFixed(5)); return d; };
+  ctl.addTo(map);
+}
+// Same haversine as the lab's calculate_distance()
+function calculateDistance(lat1, lon1, lat2, lon2){
+  const R = 6373.0, r = Math.PI/180;
+  const dlat = (lat2-lat1)*r, dlon = (lon2-lon1)*r;
+  const a = Math.sin(dlat/2)**2 + Math.cos(lat1*r)*Math.cos(lat2*r)*Math.sin(dlon/2)**2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+
+// ---- Map 1: all sites ----
+const map1 = L.map('map1').setView([30.5, -98], 4); tiles(map1);
+L.circle(NASA_JSC, {radius:1000, color:'#d35400', fill:true}).bindPopup('NASA Johnson Space Center').addTo(map1);
+label(NASA_JSC, 'NASA JSC').addTo(map1);
+for (const [name, ll] of Object.entries(SITES)){
+  L.circle(ll, {radius:1000, color:'#000000', fill:true}).bindPopup(name).addTo(map1);
+  label(ll, name).addTo(map1);
+}
+// Equator reference so the "proximity to Equator" question is visible
+L.polyline([[0,-130],[0,-60]], {color:'#2563eb', dashArray:'6 6', weight:1.5}).addTo(map1);
+label([0.8,-128], 'Equator', 'dist-label').addTo(map1);
+
+// ---- Map 2: outcomes in marker clusters ----
+const map2 = L.map('map2').setView([30.5, -98], 4); tiles(map2);
+const cluster = L.markerClusterGroup();
+const tbody = document.querySelector('#sitetable tbody');
+for (const [name, ll] of Object.entries(SITES)){
+  L.circle(ll, {radius:1000, color:'#000000', fill:true}).bindPopup(name).addTo(map2);
+  label(ll, name).addTo(map2);
+  const outs = OUTCOMES[name];
+  outs.forEach((c, i) => {
+    const color = c === 1 ? '#16a34a' : '#dc2626';
+    const icon = L.divIcon({className:'', html:'<div class="dot" style="background:'+color+'"></div>', iconSize:[14,14]});
+    cluster.addLayer(L.marker(ll, {icon}).bindPopup(name+' · launch '+(i+1)+' · '+(c===1?'Success':'Failure')));
+  });
+  const s = outs.reduce((a,b)=>a+b,0);
+  tbody.insertAdjacentHTML('beforeend', '<tr><td>'+name+'</td><td>'+outs.length+'</td><td>'+s+'</td><td>'+(100*s/outs.length).toFixed(1)+'%</td></tr>');
+}
+map2.addLayer(cluster);
+
+// ---- Map 3: proximities from CCAFS SLC-40 ----
+const site = SITES['CCAFS SLC-40'];
+const map3 = L.map('map3').setView([28.575, -80.64], 11); tiles(map3); mousePos(map3);
+L.circle(site, {radius:300, color:'#000000', fill:true}).bindPopup('CCAFS SLC-40').addTo(map3);
+label(site, 'CCAFS SLC-40').addTo(map3);
+const PROX = [
+  ['Coastline',              28.56367, -80.57163, '#0ea5e9'],
+  ['Railway (NASA Railroad)',28.57208, -80.58527, '#7c3aed'],
+  ['Highway (Samuel C Phillips Pkwy)', 28.56290, -80.57075, '#ea580c'],
+  ['City (Titusville)',      28.61200, -80.80788, '#be123c']
+];
+const dbody = document.querySelector('#disttable tbody');
+PROX.forEach(([name, lat, lon, color]) => {
+  const d = calculateDistance(site[0], site[1], lat, lon);
+  L.polyline([site, [lat, lon]], {color, weight:2}).addTo(map3);
+  L.circleMarker([lat, lon], {radius:5, color, fill:true, fillOpacity:1}).bindPopup(name).addTo(map3);
+  label([lat, lon], name.split(' (')[0]+': '+d.toFixed(2)+' KM', 'dist-label').addTo(map3);
+  dbody.insertAdjacentHTML('beforeend', '<tr><td>'+name+'</td><td>'+lat+'</td><td>'+lon+'</td><td>'+d.toFixed(2)+'</td></tr>');
+});
+
+// ---- Tabs ----
+const maps = {t1:map1, t2:map2, t3:map3};
+document.querySelectorAll('nav button').forEach(b => b.addEventListener('click', () => {
+  document.querySelectorAll('nav button').forEach(x => x.classList.toggle('active', x===b));
+  document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id===b.dataset.tab));
+  setTimeout(() => maps[b.dataset.tab].invalidateSize(), 50);
+}));
+</script>
+</body>
+</html>
